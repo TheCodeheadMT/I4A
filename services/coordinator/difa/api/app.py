@@ -11,13 +11,14 @@ from fastapi import Depends, FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
-from ..catalog import CATALOG, FAKE_BACKEND_DIGEST
+from ..catalog import CATALOG
 from ..config import Settings
 from ..domain.access import Branch, ForkError, Principal, Role, Scope, Visibility, can_create_with_visibility, \
     can_delete_branch, can_read_branch, can_write_branch, plan_fork
 from ..domain.fairqueue import QueueFull
 from ..domain.lifecycle import TERMINAL, RequestState
 from ..domain.placement import DeviceProfile, PlacementPolicy, plan
+from ..runtime.base import RuntimeFailure
 from ..runtime.fake import FakeRuntime
 from ..scheduler import Scheduler
 from ..security import Passwords, fingerprint, matches, new_id, new_secret, verifier
@@ -34,7 +35,12 @@ LOOPBACK = {"127.0.0.1", "::1", "localhost", "testclient"}
 
 def create_app(settings: Settings | None = None, runtime=None) -> FastAPI:
     settings = settings or Settings()
-    runtime = runtime or FakeRuntime(settings.fake_token_delay_s)
+    if runtime is None:
+        if os.environ.get("DIFA_RUNTIME") == "llamacpp":
+            from ..runtime.llamacpp import LlamaCppRuntime
+            runtime = LlamaCppRuntime.from_env()
+        else:
+            runtime = FakeRuntime(settings.fake_token_delay_s)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -45,6 +51,9 @@ def create_app(settings: Settings | None = None, runtime=None) -> FastAPI:
         yield
         monitor.cancel()
         await app.state.scheduler.stop()
+        for gid, g in list(app.state.scheduler.groups.items()):
+            if g.deployment_id:
+                await runtime.unload_deployment(g.deployment_id)
 
     app = FastAPI(title="DIFA Coordinator", version="0.1.0", lifespan=lifespan,
                   description="Distributed Inference For All coordinator prototype. Fake runtime only.")
@@ -103,6 +112,7 @@ async def mark_unavailable(app, group_id: str, deployment_id: str, reason: str) 
         store.audit(c, group_id, None, "deployment.unavailable", deployment_id, reason)
     sched.device_lost(group_id)
     sched.set_deployment(group_id, None, None)
+    await app.state.runtime.unload_deployment(deployment_id)
 
 
 def _branch(row) -> Branch:
@@ -409,7 +419,7 @@ def register(app: FastAPI) -> None:
         out = []
         for prof in _profiles(S(request), group_id, settings):
             state = ("unavailable" if not prof.ready else "paused" if prof.paused else
-                     "incompatible" if prof.backend_digest != FAKE_BACKEND_DIGEST else "ready")
+                     "incompatible" if prof.backend_digest != request.app.state.runtime.backend_digest else "ready")
             out.append({"device_id": prof.device_id, "name": prof.name, "os": prof.os, "arch": prof.arch,
                         "state": state, "budget_bytes": prof.budget_bytes, "power": prof.power})
         return {"devices": out}
@@ -433,11 +443,20 @@ def register(app: FastAPI) -> None:
             raise ApiError(409, "PLACEMENT_INFEASIBLE", explanation.get("reason", "No feasible placement."),
                            extra={"explanation": explanation})
         dep_id = new_id("dep")
+        if g.deployment_id:  # release the previous backend process before loading a new revision
+            await request.app.state.runtime.unload_deployment(g.deployment_id)
+            sched.set_deployment(group_id, None, None)
         with S(request).tx() as c:
             c.execute("UPDATE deployments SET state = 'retired' WHERE group_id = ? AND state != 'retired'", (group_id,))
             c.execute("INSERT INTO deployments VALUES (?,?,?,?,?,?,?)",
                       (dep_id, group_id, model.name, policy.backend_digest, json.dumps(explanation), "loading", iso(now())))
-        loaded = await request.app.state.runtime.load_deployment(dep_id, explanation)
+        try:
+            loaded = await request.app.state.runtime.load_deployment(dep_id, explanation)
+        except RuntimeFailure as e:
+            with S(request).tx() as c:
+                c.execute("UPDATE deployments SET state = 'failed' WHERE id = ?", (dep_id,))
+                S(request).audit(c, group_id, p.member_id, "deployment.failed", dep_id, e.code)
+            raise ApiError(503 if e.retryable else 409, e.code, e.message, e.retryable)
         with S(request).tx() as c:
             c.execute("UPDATE deployments SET state = 'ready' WHERE id = ?", (dep_id,))
             S(request).audit(c, group_id, p.member_id, "deployment.ready", dep_id)

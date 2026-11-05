@@ -168,8 +168,10 @@ def test_test_c_pilot_needs_all_three_and_no_single_device_fits():
     out = plan(REF, CATALOG["pilot-test-c"], POLICY)
     assert out["feasible"], out.get("reason")
     assert out["single_device_fit"] == []
-    assert [s["device_id"] for s in out["stages"]] == ["mac", "hp", "vm"]
-    assert out["stages"][-1]["layers"][1] == 64
+    # Execution order ends on the strongest device, which also holds the output head.
+    assert [s["device_id"] for s in out["stages"]] == ["vm", "hp", "mac"]
+    assert out["stages"][-1]["layers"][1] == 64 and out["stages"][-1]["holds_output_head"]
+    assert not any(s["holds_output_head"] for s in out["stages"][:-1])
     assert all(s["margin_bytes"] >= 0 for s in out["stages"])
     assert "Test C" in out["capacity_basis"]
     # Latency budget: the slow VM stage dominates even though it holds few layers.
@@ -202,3 +204,20 @@ def test_plan_is_reproducible():
     a = plan(REF, CATALOG["pilot-test-c"], POLICY)
     b = plan(list(reversed(REF)), CATALOG["pilot-test-c"], POLICY)
     assert a == b
+
+
+def test_output_head_counts_against_the_final_stage():
+    from dataclasses import replace
+    model = CATALOG["pilot-test-c"]
+    without = plan(REF, replace(model, head_bytes=0), POLICY)
+    with_head = plan(REF, model, POLICY)
+    assert with_head["stages"][-1]["weights_bytes"] - without["stages"][-1]["weights_bytes"] >= 0
+    huge = replace(model, head_bytes=int(5 * GB))
+    assert not plan(REF, huge, POLICY)["feasible"]  # the head alone can close the narrow Test C window
+
+
+def test_real_small_model_fits_every_device_so_it_is_not_a_capacity_result():
+    out = plan(REF, CATALOG["qwen2.5-0.5b-q8"], POLICY)
+    assert set(out["single_device_fit"]) == {"mac", "hp", "vm"}
+    assert [s["device_id"] for s in out["stages"]] == ["mac"]
+    assert out["capacity_basis"] == "fits a single eligible device budget"

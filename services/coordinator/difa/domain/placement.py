@@ -43,6 +43,7 @@ class ModelSpec:
     runtime_overhead_bytes: int  # R per participating device
     max_context_tokens: int
     synthetic: bool = True       # fixture, not a real model
+    head_bytes: int = 0          # output layer; llama.cpp places it on the last device in execution order
 
     def kv_bytes_per_layer(self, sequences: int = 1) -> int:
         return self.kv_bytes_per_token_per_layer * self.max_context_tokens * sequences
@@ -85,8 +86,9 @@ def _per_layer_bytes(m: ModelSpec, p: PlacementPolicy) -> int:
     return m.bytes_per_layer + m.kv_bytes_per_layer(p.active_sequences)
 
 
-def _layer_capacity(d: DeviceProfile, m: ModelSpec, p: PlacementPolicy) -> int:
-    return max(0, _usable_bytes(d, m, p) // _per_layer_bytes(m, p))
+def _layer_capacity(d: DeviceProfile, m: ModelSpec, p: PlacementPolicy, head: bool = False) -> int:
+    usable = _usable_bytes(d, m, p) - (m.head_bytes if head else 0)
+    return max(0, usable // _per_layer_bytes(m, p))
 
 
 def _score(d: DeviceProfile, peers: list[DeviceProfile], w: dict) -> dict:
@@ -125,7 +127,7 @@ def plan(devices: list[DeviceProfile], model: ModelSpec, policy: PlacementPolicy
                     key=lambda x: (-x[1]["total"], x[0].device_id))
     explanation["scores"] = [{"device_id": d.device_id, **s} for d, s in scored]
     explanation["single_device_fit"] = [d.device_id for d, _ in scored
-                                        if _layer_capacity(d, model, policy) >= model.layers]
+                                        if _layer_capacity(d, model, policy, head=True) >= model.layers]
     if not scored:
         explanation["reason"] = "no eligible devices"
         return explanation
@@ -139,19 +141,23 @@ def plan(devices: list[DeviceProfile], model: ModelSpec, policy: PlacementPolicy
             chosen = subset
             break
     if not chosen:
-        capacity = sum(_layer_capacity(d, model, policy) for d in ranked)
+        capacity = sum(_layer_capacity(d, model, policy, head=(i == 0)) for i, d in enumerate(ranked))
         explanation["reason"] = (f"insufficient combined capacity: {capacity} of {model.layers} layers fit "
                                  f"across {len(ranked)} eligible devices")
         return explanation
 
+    # Execution order puts the best-ranked device last so it also holds the output head, which the
+    # llama.cpp backend assigns to the final device (observed in Phase 1, 2026-11-05).
     stages, start = [], 0
     per_layer = _per_layer_bytes(model, policy)
-    for d, n in zip(chosen, assignment):
-        weights = n * model.bytes_per_layer
+    order = list(zip(chosen, assignment))[::-1]
+    for i, (d, n) in enumerate(order):
+        holds_head = i == len(order) - 1
+        weights = n * model.bytes_per_layer + (model.head_bytes if holds_head else 0)
         kv = n * model.kv_bytes_per_layer(policy.active_sequences)
         need = weights + kv + model.runtime_overhead_bytes
         stages.append({
-            "device_id": d.device_id, "name": d.name, "layers": [start, start + n],
+            "device_id": d.device_id, "name": d.name, "layers": [start, start + n], "holds_output_head": holds_head,
             "weights_bytes": weights, "kv_bytes": kv, "runtime_bytes": model.runtime_overhead_bytes,
             "headroom_bytes": d.budget_bytes - int(d.budget_bytes * (1 - policy.headroom_fraction)),
             "budget_bytes": d.budget_bytes, "margin_bytes": _usable_bytes(d, model, policy) + model.runtime_overhead_bytes - need,
@@ -182,7 +188,7 @@ def plan(devices: list[DeviceProfile], model: ModelSpec, policy: PlacementPolicy
 
 
 def _assign(subset: list[DeviceProfile], model: ModelSpec, policy: PlacementPolicy) -> list[int] | None:
-    caps = [_layer_capacity(d, model, policy) for d in subset]
+    caps = [_layer_capacity(d, model, policy, head=(i == 0)) for i, d in enumerate(subset)]
     if sum(caps) < model.layers or any(c < 1 for c in caps):
         return None
     remaining = model.layers - len(subset)  # every chosen device gets at least one layer

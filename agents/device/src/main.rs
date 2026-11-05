@@ -12,7 +12,7 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-const BACKEND_DIGEST: &str = "fake-runtime-0.1";
+const DEFAULT_BACKEND_DIGEST: &str = "fake-runtime-0.1";
 const GB: f64 = 1e9;
 
 #[derive(Parser)]
@@ -42,6 +42,9 @@ enum Cmd {
         /// Use a reference-device stand-in instead of probing this machine.
         #[arg(long)]
         simulate: Option<String>,
+        /// Inference backend build this device runs (must match the coordinator's deployment).
+        #[arg(long, default_value = DEFAULT_BACKEND_DIGEST)]
+        backend_digest: String,
     },
     /// Send heartbeats and enforce owner policy.
     Run {
@@ -66,6 +69,12 @@ struct State {
     name: String,
     simulate: Option<String>,
     owner_policy: OwnerPolicy,
+    #[serde(default = "default_digest")]
+    backend_digest: String,
+}
+
+fn default_digest() -> String {
+    DEFAULT_BACKEND_DIGEST.to_string()
 }
 
 #[derive(Deserialize)]
@@ -82,9 +91,9 @@ fn take_probe(simulate: &Option<String>) -> Result<probe::Probe, String> {
     }
 }
 
-fn capabilities(p: &probe::Probe, cap: u64, rtt_ms: f64) -> serde_json::Value {
+fn capabilities(p: &probe::Probe, cap: u64, rtt_ms: f64, digest: &str) -> serde_json::Value {
     json!({
-        "os": p.os, "arch": p.arch, "backend_digest": BACKEND_DIGEST, "formats": ["gguf"],
+        "os": p.os, "arch": p.arch, "backend_digest": digest, "formats": ["gguf"],
         "allocatable_bytes": allocatable(cap, p.available_bytes),
         "mem_bandwidth_gbps": (p.mem_bandwidth_gbps * 10.0).round() / 10.0,
         "rtt_ms": rtt_ms, "power": p.power.label(), "battery_pct": p.power.pct(),
@@ -114,8 +123,9 @@ fn client() -> reqwest::blocking::Client {
     reqwest::blocking::Client::builder().timeout(Duration::from_secs(10)).build().expect("http client")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn enroll(coordinator: String, code: String, name: String, memory_cap_gb: f64, allow_battery: bool, state: PathBuf,
-          simulate: Option<String>) -> Result<(), String> {
+          simulate: Option<String>, backend_digest: String) -> Result<(), String> {
     let p = take_probe(&simulate)?;
     let owner_policy = OwnerPolicy {
         memory_cap_bytes: (memory_cap_gb * GB) as u64,
@@ -127,7 +137,7 @@ fn enroll(coordinator: String, code: String, name: String, memory_cap_gb: f64, a
     };
     let body = json!({
         "code": code, "name": name, "public_key": placeholder_public_key(),
-        "capabilities": capabilities(&p, owner_policy.memory_cap_bytes, p.simulated_rtt_ms),
+        "capabilities": capabilities(&p, owner_policy.memory_cap_bytes, p.simulated_rtt_ms, &backend_digest),
         "policy": owner_policy,
     });
     let url = format!("{}/api/v1/devices/enroll", coordinator.trim_end_matches('/'));
@@ -144,6 +154,7 @@ fn enroll(coordinator: String, code: String, name: String, memory_cap_gb: f64, a
         name,
         simulate,
         owner_policy,
+        backend_digest,
     };
     save_state(&state, &st).map_err(|e| e.to_string())?;
     println!("enrolled device {} as '{}'; state saved to {}", st.device_id, st.name, state.display());
@@ -165,7 +176,8 @@ fn run(state_path: PathBuf, beats: Option<u64>) -> Result<(), String> {
         let p = take_probe(&st.simulate)?;
         let paused = effective_paused(&effective, p.power, &mut battery_hold);
         let rtt = if st.simulate.is_some() { p.simulated_rtt_ms } else { last_rtt };
-        let body = json!({"capabilities": capabilities(&p, effective.memory_cap_bytes, rtt), "paused": paused});
+        let body = json!({"capabilities": capabilities(&p, effective.memory_cap_bytes, rtt, &st.backend_digest),
+                          "paused": paused});
         let started = Instant::now();
         match http.post(&url).bearer_auth(&st.device_token).json(&body).send() {
             Ok(resp) if resp.status().is_success() => {
@@ -201,12 +213,13 @@ fn run(state_path: PathBuf, beats: Option<u64>) -> Result<(), String> {
 
 fn main() {
     let result = match Cli::parse().cmd {
-        Cmd::Enroll { coordinator, code, name, memory_cap_gb, allow_battery, state, simulate } => {
-            enroll(coordinator, code, name, memory_cap_gb, allow_battery, state, simulate)
+        Cmd::Enroll { coordinator, code, name, memory_cap_gb, allow_battery, state, simulate, backend_digest } => {
+            enroll(coordinator, code, name, memory_cap_gb, allow_battery, state, simulate, backend_digest)
         }
         Cmd::Run { state, beats } => run(state, beats),
         Cmd::Probe { simulate } => take_probe(&simulate).map(|p| {
-            println!("{}", serde_json::to_string_pretty(&capabilities(&p, u64::MAX, p.simulated_rtt_ms)).unwrap());
+            let caps = capabilities(&p, u64::MAX, p.simulated_rtt_ms, DEFAULT_BACKEND_DIGEST);
+            println!("{}", serde_json::to_string_pretty(&caps).unwrap());
         }),
     };
     if let Err(e) = result {

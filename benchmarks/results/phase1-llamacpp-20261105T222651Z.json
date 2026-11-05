@@ -1,0 +1,205 @@
+{
+  "harness": "phase1_llamacpp/1",
+  "utc": "20261105T222651Z",
+  "synthetic_prompts": true,
+  "environment": {
+    "machine": "arm64",
+    "os": "macOS-15.6.1-arm64-arm-64bit",
+    "chip": "Apple M2 Ultra"
+  },
+  "llama_cpp": {
+    "tag": "v0.9.0",
+    "commit": "cd959bae99ff4bed22bef2604f45241c09bbb8c8"
+  },
+  "model": {
+    "file": "qwen2.5-0.5b-instruct-q8_0.gguf",
+    "sha256": "ca59ca7f13d0e15a8cfa77bd17e65d24f6844b554a7b6c12e07a5f89ff76844e",
+    "source": "huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+    "license": "apache-2.0"
+  },
+  "workload": {
+    "prompt_tokens": 256,
+    "output_tokens": 128,
+    "requests": 100,
+    "decoding": "greedy, seed 42, prompt cache disabled"
+  },
+  "acceptance": {
+    "compare_tokens": 32,
+    "match_threshold": 0.9
+  },
+  "limitations": [
+    "loopback network only",
+    "RPC workers are CPU processes on the same M2 Ultra, not the HP or VM",
+    "single small model; not a capacity (Test B or Test C) result"
+  ],
+  "topologies": [
+    {
+      "name": "mac-metal",
+      "label": "Single device, Metal (baseline)",
+      "devices": "MTL0",
+      "tensor_split": null,
+      "bench": {
+        "prompt_tps": 13785.8,
+        "prompt_tps_sd": 155.7,
+        "decode_tps": 303.1,
+        "decode_tps_sd": 2.5
+      },
+      "requests": 100,
+      "all_nonempty": true,
+      "first_token_ms_p50": 23.2,
+      "first_token_ms_p95": 23.7,
+      "decode_tps_median": 291.8,
+      "wall_s_p95": 0.48,
+      "greedy_match_rate": 1.0,
+      "partition_evidence": [
+        "load_tensors: offloaded 25/25 layers to GPU",
+        "load_tensors:   CPU_Mapped model buffer size =   137.94 MiB",
+        "load_tensors:  MTL0_Mapped model buffer size =   137.94 MiB",
+        "load_tensors:  MTL0_Mapped model buffer size =   362.85 MiB",
+        "llama_kv_cache:       MTL0 KV buffer size =    48.00 MiB",
+        "sched_reserve:       MTL0 compute buffer size =    39.51 MiB",
+        "sched_reserve:        CPU compute buffer size =    11.02 MiB"
+      ],
+      "worker_rss_mb": {},
+      "model_buffers_mib": {
+        "CPU": 137.94,
+        "MTL0": 500.79
+      },
+      "all_workers_hold_weights": true,
+      "accepted": true,
+      "added_ms_per_token_vs_baseline": 0.0
+    },
+    {
+      "name": "mac-cpu4",
+      "label": "Single device, CPU 4 threads (not an HP measurement)",
+      "devices": "none",
+      "tensor_split": null,
+      "bench": {
+        "prompt_tps": 1161.8,
+        "prompt_tps_sd": 8.1,
+        "decode_tps": 229.1,
+        "decode_tps_sd": 5.0
+      },
+      "requests": 100,
+      "all_nonempty": true,
+      "first_token_ms_p50": 219.8,
+      "first_token_ms_p95": 230.8,
+      "decode_tps_median": 208.1,
+      "wall_s_p95": 0.905,
+      "greedy_match_rate": 1.0,
+      "partition_evidence": [
+        "load_tensors: offloaded 0/25 layers to GPU",
+        "load_tensors:   CPU_Mapped model buffer size =   137.95 MiB",
+        "load_tensors:   CPU_REPACK model buffer size =   500.52 MiB",
+        "llama_kv_cache:        CPU KV buffer size =    48.00 MiB",
+        "sched_reserve:        CPU compute buffer size =    41.27 MiB"
+      ],
+      "worker_rss_mb": {},
+      "model_buffers_mib": {
+        "CPU": 137.95,
+        "CPU_REPACK": 500.52
+      },
+      "all_workers_hold_weights": true,
+      "accepted": true,
+      "added_ms_per_token_vs_baseline": 1.066
+    },
+    {
+      "name": "coop-2",
+      "label": "Metal + 1 RPC CPU worker",
+      "devices": "MTL0,RPC0",
+      "tensor_split": "0.8,0.2",
+      "bench": {
+        "prompt_tps": 2160.2,
+        "prompt_tps_sd": 6.3,
+        "decode_tps": 139.2,
+        "decode_tps_sd": 0.8
+      },
+      "requests": 100,
+      "all_nonempty": true,
+      "first_token_ms_p50": 129.0,
+      "first_token_ms_p95": 132.4,
+      "decode_tps_median": 131.5,
+      "wall_s_p95": 1.153,
+      "greedy_match_rate": 1.0,
+      "partition_evidence": [
+        "load_tensors: offloaded 25/25 layers to GPU",
+        "load_tensors:   CPU_Mapped model buffer size =   137.94 MiB",
+        "load_tensors:  MTL0_Mapped model buffer size =   196.54 MiB",
+        "load_tensors:  MTL0_Mapped model buffer size =   105.83 MiB",
+        "load_tensors: RPC0[127.0.0.1:50052] model buffer size =   198.42 MiB",
+        "llama_kv_cache:       MTL0 KV buffer size =    40.00 MiB",
+        "llama_kv_cache: RPC0[127.0.0.1:50052] KV buffer size =     8.00 MiB",
+        "sched_reserve:       MTL0 compute buffer size =    39.51 MiB",
+        "sched_reserve: RPC0[127.0.0.1:50052] compute buffer size =    37.76 MiB",
+        "sched_reserve:        CPU compute buffer size =    11.02 MiB"
+      ],
+      "worker_rss_mb": {
+        "cpu4": {
+          "idle": 247.2,
+          "loaded": 464.6
+        }
+      },
+      "model_buffers_mib": {
+        "CPU": 137.94,
+        "MTL0": 302.37,
+        "rpc:127.0.0.1:50052": 198.42
+      },
+      "all_workers_hold_weights": true,
+      "accepted": true,
+      "added_ms_per_token_vs_baseline": 3.885
+    },
+    {
+      "name": "coop-3",
+      "label": "Metal + 2 RPC CPU workers (Test A shape)",
+      "devices": "MTL0,RPC0,RPC1",
+      "tensor_split": "0.80,0.12,0.08",
+      "bench": {
+        "prompt_tps": 2073.1,
+        "prompt_tps_sd": 15.8,
+        "decode_tps": 114.5,
+        "decode_tps_sd": 0.9
+      },
+      "requests": 100,
+      "all_nonempty": true,
+      "first_token_ms_p50": 135.4,
+      "first_token_ms_p95": 136.4,
+      "decode_tps_median": 109.9,
+      "wall_s_p95": 1.299,
+      "greedy_match_rate": 1.0,
+      "partition_evidence": [
+        "load_tensors: offloaded 25/25 layers to GPU",
+        "load_tensors:   CPU_Mapped model buffer size =   137.94 MiB",
+        "load_tensors:  MTL0_Mapped model buffer size =   196.54 MiB",
+        "load_tensors:  MTL0_Mapped model buffer size =   105.83 MiB",
+        "load_tensors: RPC0[127.0.0.1:50052] model buffer size =    45.36 MiB",
+        "load_tensors: RPC0[127.0.0.1:50053] model buffer size =   153.06 MiB",
+        "llama_kv_cache:       MTL0 KV buffer size =    40.00 MiB",
+        "llama_kv_cache: RPC0[127.0.0.1:50052] KV buffer size =     6.00 MiB",
+        "llama_kv_cache: RPC0[127.0.0.1:50053] KV buffer size =     2.00 MiB",
+        "sched_reserve:       MTL0 compute buffer size =    39.51 MiB",
+        "sched_reserve: RPC0[127.0.0.1:50052] compute buffer size =    37.76 MiB",
+        "sched_reserve: RPC0[127.0.0.1:50053] compute buffer size =    11.01 MiB",
+        "sched_reserve:        CPU compute buffer size =    11.02 MiB"
+      ],
+      "worker_rss_mb": {
+        "cpu4": {
+          "idle": 298.5,
+          "loaded": 354.8
+        },
+        "cpu2": {
+          "idle": 234.0,
+          "loaded": 395.1
+        }
+      },
+      "model_buffers_mib": {
+        "CPU": 137.94,
+        "MTL0": 302.37,
+        "rpc:127.0.0.1:50052": 45.36,
+        "rpc:127.0.0.1:50053": 153.06
+      },
+      "all_workers_hold_weights": true,
+      "accepted": true,
+      "added_ms_per_token_vs_baseline": 5.434
+    }
+  ]
+}

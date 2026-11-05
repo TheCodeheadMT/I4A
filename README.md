@@ -59,6 +59,51 @@ Regenerate the contract after API changes:
 ~/.venvs/difa/bin/python scripts/export_openapi.py
 ```
 
+## Phase 1: llama.cpp feasibility (in progress)
+
+`services/coordinator/difa/runtime/llamacpp.py` is a real backend adapter behind the same contract as
+the fake runtime. The coordinator host runs `llama-server` on its own Metal device and reaches other
+stages through llama.cpp RPC workers; the placement pipeline's layer counts become `--tensor-split`
+shares, and the adapter refuses a deployment unless llama.cpp's load log shows weights on every stage.
+`benchmarks/phase1_llamacpp.py` measures single-device baselines and cooperation topologies with
+100 warm requests each and a pre-declared greedy-match acceptance rule; results land in
+`benchmarks/results/`.
+
+Research-only constraints, as the spec requires: llama.cpp RPC is upstream-documented as insecure, so the
+adapter refuses non-loopback RPC endpoints unless explicitly allowed, binds `llama-server` to 127.0.0.1
+with a random API key, and all prompts are synthetic. So far every RPC worker is a CPU process on the
+same Mac; the real HP and VM, and real network paths, are still untested.
+
+One-time setup (pinned build and model, outside iCloud):
+
+```bash
+brew install cmake && git clone --depth 1 --branch v0.9.0 https://github.com/ggml-org/llama.cpp.git ~/.cache/difa-phase1/llama.cpp
+```
+
+```bash
+cd ~/.cache/difa-phase1/llama.cpp && cmake -B build -DGGML_METAL=ON -DGGML_RPC=ON -DLLAMA_CURL=OFF && cmake --build build -j --target llama-server llama-bench ggml-rpc-server
+```
+
+```bash
+mkdir -p ~/.cache/difa-phase1/models && curl -L -o ~/.cache/difa-phase1/models/qwen2.5-0.5b-instruct-q8_0.gguf https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q8_0.gguf
+```
+
+```bash
+~/.venvs/difa/bin/python benchmarks/phase1_llamacpp.py
+```
+
+Full write-up with numbers: [benchmarks/results/phase1-findings.md](benchmarks/results/phase1-findings.md).
+Findings so far that change the design:
+
+- Metal on the Mac Studio reports a working-set limit of 103,079 MB, inside the spec 3.2 planning range.
+- An RPC worker advertises all host memory and has no memory-cap option, so owner limits (FR 07) must be
+  enforced by the agent around the worker, not by llama.cpp.
+- A small tensor-split share can round a device down to zero layers while it still appears as a
+  participant; the harness and adapter now fail any placement where a stage holds no weights.
+- llama.cpp puts the output head on the last device. The planner now orders stages so the strongest
+  device runs last and counts the head against its budget.
+- llama.cpp labels every RPC buffer `RPC0[host:port]`; only the endpoint identifies the device.
+
 ## Spec coverage
 
 Implemented and tested: FR 01 to FR 05 (groups, invitations, removal), FR 06 to FR 09 and FR 26

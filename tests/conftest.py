@@ -79,9 +79,10 @@ def group(client):
 
 
 def enroll(client: TestClient, user: User, name: str, allocatable_gb: float, cap_gb: float, bw: float, rtt: float,
-           power: str = "ac", allow_battery: bool = False, paused: bool = False) -> dict:
+           power: str = "ac", allow_battery: bool = False, paused: bool = False,
+           digest: str = "fake-runtime-0.1") -> dict:
     code = user.post("/api/v1/devices/enrollment-codes").json()["code"]
-    caps = {"os": "test", "arch": "x86_64", "backend_digest": "fake-runtime-0.1", "formats": ["gguf"],
+    caps = {"os": "test", "arch": "x86_64", "backend_digest": digest, "formats": ["gguf"],
             "allocatable_bytes": int(allocatable_gb * GB), "mem_bandwidth_gbps": bw, "rtt_ms": rtt, "power": power}
     r = client.post("/api/v1/devices/enroll", json={
         "code": code, "name": name, "public_key": "test-key", "capabilities": caps,
