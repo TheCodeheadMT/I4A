@@ -4,6 +4,7 @@
 
 mod policy;
 mod probe;
+mod worker;
 
 use clap::{Parser, Subcommand};
 use policy::{allocatable, effective_paused, merge, Lease, OwnerPolicy};
@@ -11,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use worker::{Worker, WorkerConfig};
 
 const DEFAULT_BACKEND_DIGEST: &str = "fake-runtime-0.1";
 const GB: f64 = 1e9;
@@ -53,6 +55,23 @@ enum Cmd {
         /// Stop after this many heartbeats (for tests).
         #[arg(long)]
         beats: Option<u64>,
+        /// Run and supervise a llama.cpp rpc-server under the owner's memory cap.
+        #[arg(long)]
+        worker_bin: Option<PathBuf>,
+        #[arg(long, default_value = "127.0.0.1")]
+        worker_host: String,
+        #[arg(long, default_value_t = 50052)]
+        worker_port: u16,
+        #[arg(long, default_value_t = 4)]
+        worker_threads: u32,
+        /// Time real decoding with llama-bench at startup instead of reporting a memory-copy figure.
+        #[arg(long)]
+        decode_probe_bench: Option<PathBuf>,
+        #[arg(long)]
+        decode_probe_model: Option<PathBuf>,
+        /// Catalog name of the probe model, so the coordinator can convert tokens/s to bandwidth.
+        #[arg(long, default_value = "qwen2.5-0.5b-q8")]
+        decode_probe_catalog: String,
     },
     /// Print what this device would report, without contacting a coordinator.
     Probe {
@@ -89,6 +108,19 @@ fn take_probe(simulate: &Option<String>) -> Result<probe::Probe, String> {
         Some(name) => probe::simulated(name).ok_or_else(|| format!("unknown simulation profile {name}")),
         None => Ok(probe::real()),
     }
+}
+
+fn take_probe_cached(simulate: &Option<String>, bandwidth: f64) -> Result<probe::Probe, String> {
+    match simulate {
+        Some(_) => take_probe(simulate),
+        None => Ok(probe::real_with(bandwidth)),
+    }
+}
+
+struct RunOptions {
+    beats: Option<u64>,
+    worker: Option<WorkerConfig>,
+    decode_probe: Option<(PathBuf, PathBuf, String)>,
 }
 
 fn capabilities(p: &probe::Probe, cap: u64, rtt_ms: f64, digest: &str) -> serde_json::Value {
@@ -161,7 +193,7 @@ fn enroll(coordinator: String, code: String, name: String, memory_cap_gb: f64, a
     Ok(())
 }
 
-fn run(state_path: PathBuf, beats: Option<u64>) -> Result<(), String> {
+fn run(state_path: PathBuf, opts: RunOptions) -> Result<(), String> {
     let raw = std::fs::read(&state_path).map_err(|e| format!("cannot read {}: {e}", state_path.display()))?;
     let st: State = serde_json::from_slice(&raw).map_err(|e| e.to_string())?;
     let http = client();
@@ -172,42 +204,94 @@ fn run(state_path: PathBuf, beats: Option<u64>) -> Result<(), String> {
     let mut last_rtt = 0.0;
     let mut assignment: Option<serde_json::Value> = None;
     let mut count = 0u64;
+    let bandwidth = if st.simulate.is_some() { 0.0 } else { probe::measure_bandwidth() };
+    let decode = opts.decode_probe.as_ref().and_then(|(bench, model, catalog)| {
+        let threads = opts.worker.as_ref().map(|w| w.threads);
+        match probe::decode_probe(bench, model, threads) {
+            Ok(tps) => {
+                println!("decode probe: {tps:.1} tokens/s on {}", if threads.is_some() { "cpu" } else { "default backend" });
+                Some(json!({"model": catalog, "tokens_per_s": tps,
+                            "backend": if threads.is_some() { "cpu" } else { "default" }, "threads": threads}))
+            }
+            Err(e) => {
+                println!("decode probe unavailable: {e}");
+                None
+            }
+        }
+    });
+    let mut worker = opts.worker.clone().map(Worker::new);
+    // Stop the worker on SIGTERM or Ctrl-C so no inference process outlives its supervisor.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = stop.clone();
+    let _ = ctrlc::set_handler(move || flag.store(true, std::sync::atomic::Ordering::SeqCst));
+    let mut paused = true;
+    let mut next_beat = Instant::now();
     loop {
-        let p = take_probe(&st.simulate)?;
-        let paused = effective_paused(&effective, p.power, &mut battery_hold);
-        let rtt = if st.simulate.is_some() { p.simulated_rtt_ms } else { last_rtt };
-        let body = json!({"capabilities": capabilities(&p, effective.memory_cap_bytes, rtt, &st.backend_digest),
-                          "paused": paused});
-        let started = Instant::now();
-        match http.post(&url).bearer_auth(&st.device_token).json(&body).send() {
-            Ok(resp) if resp.status().is_success() => {
-                last_rtt = (started.elapsed().as_secs_f64() * 1000.0 * 10.0).round() / 10.0;
-                let reply: HeartbeatReply = resp.json().map_err(|e| e.to_string())?;
-                effective = merge(&st.owner_policy, &reply.policy);
-                lease.renew(Instant::now(), Duration::from_secs(reply.lease_s));
-                if reply.assignment != assignment {
-                    println!("assignment: {}", reply.assignment.as_ref().map_or("none".into(), |a| a.to_string()));
-                    assignment = reply.assignment;
-                }
-                println!("heartbeat ok: paused={paused} power={} cap={:.1}GB rtt={last_rtt}ms",
-                         p.power.label(), effective.memory_cap_bytes as f64 / GB);
+        if stop.load(std::sync::atomic::Ordering::SeqCst) {
+            if let Some(w) = worker.as_mut() {
+                w.halt("agent stopped");
             }
-            Ok(resp) if resp.status().as_u16() == 401 || resp.status().as_u16() == 403 => {
-                println!("device authorization revoked: stopping all local work");
-                return Err("revoked".into());
-            }
-            Ok(resp) => println!("heartbeat rejected: {}", resp.status()),
-            Err(e) => println!("coordinator unreachable: {e}"),
-        }
-        if assignment.is_some() && !lease.valid(Instant::now()) {
-            println!("lease expired: releasing assigned work");
-            assignment = None;
-        }
-        count += 1;
-        if beats.is_some_and(|b| count >= b) {
+            println!("agent stopping: worker halted");
             return Ok(());
         }
-        std::thread::sleep(Duration::from_secs(5));
+        // Watchdog: every 250 ms, independent of heartbeats and coordinator reachability.
+        if let Some(w) = worker.as_mut() {
+            let should_run = !paused && lease.valid(Instant::now());
+            if let Some(line) = w.tick(should_run, effective.memory_cap_bytes) {
+                println!("{line}");
+                if line.starts_with("worker killed") {
+                    next_beat = Instant::now(); // report the capacity change immediately
+                }
+            }
+        }
+        if Instant::now() >= next_beat {
+            let p = take_probe_cached(&st.simulate, bandwidth)?;
+            paused = effective_paused(&effective, p.power, &mut battery_hold);
+            let rtt = if st.simulate.is_some() { p.simulated_rtt_ms } else { last_rtt };
+            let mut caps = capabilities(&p, effective.memory_cap_bytes, rtt, &st.backend_digest);
+            if let Some(d) = &decode {
+                caps["decode_probe"] = d.clone();
+            }
+            let mut body = json!({"capabilities": caps, "paused": paused});
+            if let Some(w) = worker.as_mut() {
+                body["worker"] = w.status();
+            }
+            let started = Instant::now();
+            match http.post(&url).bearer_auth(&st.device_token).json(&body).send() {
+                Ok(resp) if resp.status().is_success() => {
+                    last_rtt = (started.elapsed().as_secs_f64() * 1000.0 * 10.0).round() / 10.0;
+                    let reply: HeartbeatReply = resp.json().map_err(|e| e.to_string())?;
+                    effective = merge(&st.owner_policy, &reply.policy);
+                    paused = effective_paused(&effective, p.power, &mut battery_hold);
+                    lease.renew(Instant::now(), Duration::from_secs(reply.lease_s));
+                    if reply.assignment != assignment {
+                        println!("assignment: {}", reply.assignment.as_ref().map_or("none".into(), |a| a.to_string()));
+                        assignment = reply.assignment;
+                    }
+                    println!("heartbeat ok: paused={paused} power={} cap={:.2}GB rtt={last_rtt}ms",
+                             p.power.label(), effective.memory_cap_bytes as f64 / GB);
+                }
+                Ok(resp) if resp.status().as_u16() == 401 || resp.status().as_u16() == 403 => {
+                    println!("device authorization revoked: stopping all local work");
+                    if let Some(w) = worker.as_mut() {
+                        w.halt("authorization revoked");
+                    }
+                    return Err("revoked".into());
+                }
+                Ok(resp) => println!("heartbeat rejected: {}", resp.status()),
+                Err(e) => println!("coordinator unreachable: {e}"),
+            }
+            if assignment.is_some() && !lease.valid(Instant::now()) {
+                println!("lease expired: releasing assigned work");
+                assignment = None;
+            }
+            count += 1;
+            if opts.beats.is_some_and(|b| count >= b) {
+                return Ok(());
+            }
+            next_beat = Instant::now() + Duration::from_secs(5);
+        }
+        std::thread::sleep(Duration::from_millis(250));
     }
 }
 
@@ -216,7 +300,13 @@ fn main() {
         Cmd::Enroll { coordinator, code, name, memory_cap_gb, allow_battery, state, simulate, backend_digest } => {
             enroll(coordinator, code, name, memory_cap_gb, allow_battery, state, simulate, backend_digest)
         }
-        Cmd::Run { state, beats } => run(state, beats),
+        Cmd::Run { state, beats, worker_bin, worker_host, worker_port, worker_threads, decode_probe_bench,
+                   decode_probe_model, decode_probe_catalog } => {
+            let worker = worker_bin.map(|bin| WorkerConfig { bin, host: worker_host, port: worker_port,
+                                                             threads: worker_threads });
+            let decode_probe = decode_probe_bench.zip(decode_probe_model).map(|(b, m)| (b, m, decode_probe_catalog));
+            run(state, RunOptions { beats, worker, decode_probe })
+        }
         Cmd::Probe { simulate } => take_probe(&simulate).map(|p| {
             let caps = capabilities(&p, u64::MAX, p.simulated_rtt_ms, DEFAULT_BACKEND_DIGEST);
             println!("{}", serde_json::to_string_pretty(&caps).unwrap());

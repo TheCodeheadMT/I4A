@@ -1,0 +1,310 @@
+{
+  "harness": "phase1_latency/1",
+  "utc": "20261105T225814Z",
+  "synthetic_prompts": true,
+  "constants": {
+    "bw_mib_per_ms": {
+      "MTL0": 149.18,
+      "w1": 107.75,
+      "w2": 107.75,
+      "w3": 67.64
+    },
+    "bw_gb_per_s": {
+      "MTL0": 156.4,
+      "w1": 113.0,
+      "w2": 113.0,
+      "w3": 70.9
+    },
+    "o_first_ms": 3.579,
+    "o_extra_ms": 0.738,
+    "round_trips_per_token_per_remote_stage": 1.024,
+    "relay_floor_ms": 0.417
+  },
+  "validation": [
+    {
+      "topology": "val-2-even",
+      "predicted_ms": 7.72,
+      "measured_ms": 8.793,
+      "error_pct": -12.2,
+      "within_target": true
+    },
+    {
+      "topology": "val-3",
+      "predicted_ms": 8.38,
+      "measured_ms": 9.192,
+      "error_pct": -8.8,
+      "within_target": true
+    },
+    {
+      "topology": "val-4",
+      "predicted_ms": 10.08,
+      "measured_ms": 10.749,
+      "error_pct": -6.2,
+      "within_target": true
+    },
+    {
+      "topology": "val-3-rtt80",
+      "predicted_ms": 173.7,
+      "measured_ms": 175.273,
+      "error_pct": -0.9,
+      "within_target": true
+    }
+  ],
+  "bandwidth_only_model": [
+    {
+      "topology": "val-2-even",
+      "bandwidth_only_ms": 4.14,
+      "measured_ms": 8.793,
+      "error_pct": -52.9
+    },
+    {
+      "topology": "val-3",
+      "bandwidth_only_ms": 4.06,
+      "measured_ms": 9.192,
+      "error_pct": -55.8
+    },
+    {
+      "topology": "val-4",
+      "bandwidth_only_ms": 5.03,
+      "measured_ms": 10.749,
+      "error_pct": -53.2
+    }
+  ],
+  "rtt_sweep": [
+    {
+      "rtt_ms": 0,
+      "decode_ms": 7.864,
+      "prompt_ms": 159.1,
+      "load_s": 0.72
+    },
+    {
+      "rtt_ms": 20,
+      "decode_ms": 29.187,
+      "prompt_ms": 184.6,
+      "load_s": 2.05
+    },
+    {
+      "rtt_ms": 80,
+      "decode_ms": 89.476,
+      "prompt_ms": 257.3,
+      "load_s": 5.03
+    },
+    {
+      "rtt_ms": 150,
+      "decode_ms": 161.936,
+      "prompt_ms": 333.3,
+      "load_s": 8.35
+    }
+  ],
+  "bandwidth_caps": [
+    {
+      "mbps": 100,
+      "rtt_ms": 20,
+      "load_s": 18.51,
+      "decode_ms": 78.09,
+      "prompt_ms": 382.8,
+      "remote_weights_mib": 198.42
+    },
+    {
+      "mbps": 50,
+      "rtt_ms": 20,
+      "load_s": 35.38,
+      "decode_ms": 129.402,
+      "prompt_ms": 562.6,
+      "remote_weights_mib": 198.42
+    },
+    {
+      "mbps": 25,
+      "rtt_ms": 20,
+      "load_s": 68.94,
+      "decode_ms": 228.317,
+      "prompt_ms": 915.9,
+      "remote_weights_mib": 198.42
+    }
+  ],
+  "runs": {
+    "single-metal": {
+      "name": "single-metal",
+      "load_s": 16.87,
+      "decode_ms": 3.357,
+      "prompt_ms": 24.9,
+      "buffers_mib": {
+        "CPU": 137.94,
+        "MTL0": 500.79
+      }
+    },
+    "single-cpu4": {
+      "name": "single-cpu4",
+      "load_s": 0.52,
+      "decode_ms": 4.645,
+      "prompt_ms": 276.9,
+      "buffers_mib": {
+        "CPU": 137.95,
+        "CPU_REPACK": 500.52
+      }
+    },
+    "single-cpu2": {
+      "name": "single-cpu2",
+      "load_s": 0.52,
+      "decode_ms": 7.4,
+      "prompt_ms": 549.6,
+      "buffers_mib": {
+        "CPU": 137.95,
+        "CPU_REPACK": 500.52
+      }
+    },
+    "cal-2": {
+      "name": "cal-2",
+      "load_s": 0.73,
+      "decode_ms": 7.447,
+      "prompt_ms": 155.9,
+      "buffers_mib": {
+        "CPU": 137.94,
+        "MTL0": 302.37,
+        "127.0.0.1:50082": 198.42
+      }
+    },
+    "cal-3": {
+      "name": "cal-3",
+      "load_s": 0.72,
+      "decode_ms": 9.027,
+      "prompt_ms": 164.8,
+      "buffers_mib": {
+        "CPU": 137.94,
+        "MTL0": 302.37,
+        "127.0.0.1:50082": 45.36,
+        "127.0.0.1:50084": 153.06
+      }
+    },
+    "val-2-even": {
+      "name": "val-2-even",
+      "load_s": 0.72,
+      "decode_ms": 8.793,
+      "prompt_ms": 432.4,
+      "buffers_mib": {
+        "CPU": 137.94,
+        "MTL0": 196.54,
+        "127.0.0.1:50082": 304.25
+      }
+    },
+    "val-3": {
+      "name": "val-3",
+      "load_s": 0.72,
+      "decode_ms": 9.192,
+      "prompt_ms": 354.5,
+      "buffers_mib": {
+        "CPU": 137.94,
+        "MTL0": 226.78,
+        "127.0.0.1:50082": 75.59,
+        "127.0.0.1:50083": 198.42
+      }
+    },
+    "val-4": {
+      "name": "val-4",
+      "load_s": 0.72,
+      "decode_ms": 10.749,
+      "prompt_ms": 440.8,
+      "buffers_mib": {
+        "CPU": 137.94,
+        "MTL0": 211.66,
+        "127.0.0.1:50082": 60.47,
+        "127.0.0.1:50083": 60.47,
+        "127.0.0.1:50084": 168.18
+      }
+    },
+    "rtt-0": {
+      "name": "rtt-0",
+      "load_s": 0.72,
+      "decode_ms": 7.864,
+      "prompt_ms": 159.1,
+      "buffers_mib": {
+        "CPU": 137.94,
+        "MTL0": 302.37,
+        "127.0.0.1:60082": 198.42
+      }
+    },
+    "rtt-20": {
+      "name": "rtt-20",
+      "load_s": 2.05,
+      "decode_ms": 29.187,
+      "prompt_ms": 184.6,
+      "buffers_mib": {
+        "CPU": 137.94,
+        "MTL0": 302.37,
+        "127.0.0.1:60082": 198.42
+      }
+    },
+    "rtt-80": {
+      "name": "rtt-80",
+      "load_s": 5.03,
+      "decode_ms": 89.476,
+      "prompt_ms": 257.3,
+      "buffers_mib": {
+        "CPU": 137.94,
+        "MTL0": 302.37,
+        "127.0.0.1:60082": 198.42
+      }
+    },
+    "rtt-150": {
+      "name": "rtt-150",
+      "load_s": 8.35,
+      "decode_ms": 161.936,
+      "prompt_ms": 333.3,
+      "buffers_mib": {
+        "CPU": 137.94,
+        "MTL0": 302.37,
+        "127.0.0.1:60082": 198.42
+      }
+    },
+    "val-3-rtt80": {
+      "name": "val-3-rtt80",
+      "load_s": 8.67,
+      "decode_ms": 175.273,
+      "prompt_ms": 358.8,
+      "buffers_mib": {
+        "CPU": 137.94,
+        "MTL0": 302.37,
+        "127.0.0.1:60082": 45.36,
+        "127.0.0.1:60084": 153.06
+      }
+    },
+    "bw-100": {
+      "name": "bw-100",
+      "load_s": 18.51,
+      "decode_ms": 78.09,
+      "prompt_ms": 382.8,
+      "buffers_mib": {
+        "CPU": 137.94,
+        "MTL0": 302.37,
+        "127.0.0.1:60082": 198.42
+      }
+    },
+    "bw-50": {
+      "name": "bw-50",
+      "load_s": 35.38,
+      "decode_ms": 129.402,
+      "prompt_ms": 562.6,
+      "buffers_mib": {
+        "CPU": 137.94,
+        "MTL0": 302.37,
+        "127.0.0.1:60082": 198.42
+      }
+    },
+    "bw-25": {
+      "name": "bw-25",
+      "load_s": 68.94,
+      "decode_ms": 228.317,
+      "prompt_ms": 915.9,
+      "buffers_mib": {
+        "CPU": 137.94,
+        "MTL0": 302.37,
+        "127.0.0.1:60082": 198.42
+      }
+    }
+  },
+  "limitations": [
+    "all workers are local CPU processes",
+    "network paths are simulated by a userspace relay",
+    "one small model (Qwen2.5-0.5B Q8_0)"
+  ]
+}

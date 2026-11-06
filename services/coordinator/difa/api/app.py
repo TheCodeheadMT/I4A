@@ -97,11 +97,20 @@ async def _liveness_monitor(app) -> None:
             if not g.placement:
                 continue
             for stage in g.placement["stages"]:
-                d = store.one("SELECT last_seen, status FROM devices WHERE id = ?", (stage["device_id"],))
+                d = store.one("SELECT last_seen, status, capabilities, policy FROM devices WHERE id = ?",
+                              (stage["device_id"],))
                 stale = (not d or d["status"] != "active" or not d["last_seen"]
                          or (now() - parse(d["last_seen"])).total_seconds() > settings.heartbeat_unassign_s)
-                if stale:
-                    await mark_unavailable(app, gid, g.deployment_id, f"device {stage['device_id']} unavailable")
+                # Owner pause, a lowered cap, or a stopped worker is a capacity change: drain (FR 09).
+                drained = False
+                if d and not stale:
+                    worker = json.loads(d["capabilities"]).get("worker")
+                    pol = json.loads(d["policy"])
+                    drained = (pol.get("paused") or pol.get("reported_paused")
+                               or bool(worker and worker["state"] != "running"))
+                if stale or drained:
+                    why = "unavailable" if stale else "drained by owner policy or worker stop"
+                    await mark_unavailable(app, gid, g.deployment_id, f"device {stage['device_id']} {why}")
                     break
 
 
@@ -131,12 +140,24 @@ def _profiles(store: Store, group_id: str, settings: Settings) -> list[DevicePro
     for d in store.all("SELECT * FROM devices WHERE group_id = ?", (group_id,)):
         cap, pol = json.loads(d["capabilities"]), json.loads(d["policy"])
         fresh = bool(d["last_seen"]) and (now() - parse(d["last_seen"])).total_seconds() <= settings.heartbeat_unassign_s
+        worker = cap.get("worker")
+        reason = None if fresh else "device not ready (no valid heartbeat)"
+        if fresh and worker and worker["state"] != "running":
+            reason = f"inference worker stopped: {worker.get('last_stop_reason') or 'not started'}"
+        bandwidth, source = cap["mem_bandwidth_gbps"], "reported"
+        probe = cap.get("decode_probe")
+        if probe and probe["model"] in CATALOG:  # convert timed decoding into streamed bytes per second
+            ref = CATALOG[probe["model"]]
+            bandwidth = round((ref.layers * ref.bytes_per_layer + ref.head_bytes) * probe["tokens_per_s"] / 1e9, 1)
+            source = "decode_probe"
         out.append(DeviceProfile(
             device_id=d["id"], name=d["name"], os=cap["os"], arch=cap["arch"], backend_digest=cap["backend_digest"],
             formats=tuple(cap["formats"]), budget_bytes=min(pol["memory_cap_bytes"], cap["allocatable_bytes"]),
-            mem_bandwidth_gbps=cap["mem_bandwidth_gbps"], rtt_ms=cap["rtt_ms"], power=cap["power"],
-            allow_battery=pol["allow_battery"], ready=fresh, authorized=d["status"] == "active",
-            paused=pol["paused"] or pol.get("reported_paused", False), stability=1.0))
+            mem_bandwidth_gbps=bandwidth, rtt_ms=cap["rtt_ms"], power=cap["power"],
+            allow_battery=pol["allow_battery"], ready=reason is None, authorized=d["status"] == "active",
+            paused=pol["paused"] or pol.get("reported_paused", False), stability=1.0,
+            endpoint=worker["endpoint"] if worker and worker["state"] == "running" else None,
+            bandwidth_source=source, not_ready_reason=reason))
     return out
 
 
@@ -382,9 +403,12 @@ def register(app: FastAPI) -> None:
         d = _device_by_token(request, device_id)
         policy = json.loads(d["policy"])
         policy["reported_paused"] = body.paused
+        caps = body.capabilities.model_dump()
+        if body.worker:
+            caps["worker"] = body.worker.model_dump()
         with S(request).tx() as c:
             c.execute("UPDATE devices SET capabilities = ?, policy = ?, last_seen = ? WHERE id = ?",
-                      (body.capabilities.model_dump_json(), json.dumps(policy), iso(now()), device_id))
+                      (json.dumps(caps), json.dumps(policy), iso(now()), device_id))
         g = request.app.state.scheduler.group(d["group_id"])
         stage = next((s for s in (g.placement or {}).get("stages", []) if s["device_id"] == device_id), None)
         public_policy = {k: v for k, v in policy.items() if k != "reported_paused"}
@@ -437,7 +461,8 @@ def register(app: FastAPI) -> None:
         g = sched.group(group_id)
         if g.running or len(g.queue):
             raise ApiError(409, "DEPLOYMENT_BUSY", "Wait for queued and running requests to finish.", True)
-        policy = PlacementPolicy(backend_digest=request.app.state.runtime.backend_digest, require_all=body.require_all)
+        policy = PlacementPolicy(backend_digest=request.app.state.runtime.backend_digest, require_all=body.require_all,
+                                 local_device=getattr(request.app.state.runtime, "local_device", None))
         explanation = plan(_profiles(S(request), group_id, settings), model, policy)
         if not explanation["feasible"]:
             raise ApiError(409, "PLACEMENT_INFEASIBLE", explanation.get("reason", "No feasible placement."),

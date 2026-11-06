@@ -27,6 +27,10 @@ class DeviceProfile:
     authorized: bool = True
     paused: bool = False
     stability: float = 1.0       # fraction of recent heartbeats received
+    endpoint: str | None = None  # inference worker address reported by the agent, if it runs one
+    link_mbps: float | None = None   # measured path bandwidth to the coordinator, if known
+    bandwidth_source: str = "reported"   # "decode_probe" when derived from timed decoding (FR 06)
+    not_ready_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -50,16 +54,37 @@ class ModelSpec:
 
 
 @dataclass(frozen=True)
+class BackendCost:
+    """Fixed per-token costs of a backend's transport, fitted from measurements (spec 7.2).
+
+    Defaults: llama.cpp v0.9.0 RPC, fitted on loopback calibration topologies and checked on held-out
+    topologies within 13 percent (benchmarks/results/phase1-latency-20261105T225814Z.json). The per-token
+    traffic figure was measured for Qwen2.5-0.5B and grows with the model's graph; remeasure per model.
+    """
+    name: str = "llama.cpp-v0.9.0-rpc"
+    first_remote_ms: float = 3.58
+    extra_remote_ms: float = 0.74
+    round_trips_per_token: float = 1.02
+    bytes_per_token_per_remote: float = 0.62e6
+
+
+LLAMACPP_RPC_V090 = BackendCost()
+
+
+@dataclass(frozen=True)
 class PlacementPolicy:
     backend_digest: str
     headroom_fraction: float = 0.10   # X: transfers, duplication, and uncertainty
     active_sequences: int = 1          # G
     require_all: bool = False          # Test A cooperation topology
+    local_device: str | None = None    # device name the coordinator runs locally; others are remote
+    backend_cost: BackendCost = LLAMACPP_RPC_V090
     weights: dict = field(default_factory=lambda: {"bandwidth": 0.4, "latency": 0.3, "power": 0.2, "stability": 0.1})
 
 
 def _f_authorized(d, m, p): return None if d.authorized else "device authorization revoked or expired"
-def _f_ready(d, m, p): return None if d.ready else "device not ready (no valid heartbeat)"
+def _f_ready(d, m, p):
+    return None if d.ready else (d.not_ready_reason or "device not ready (no valid heartbeat)")
 def _f_paused(d, m, p): return "paused by owner" if d.paused else None
 def _f_power(d, m, p):
     if d.power == "battery" and not d.allow_battery:
@@ -158,6 +183,7 @@ def plan(devices: list[DeviceProfile], model: ModelSpec, policy: PlacementPolicy
         need = weights + kv + model.runtime_overhead_bytes
         stages.append({
             "device_id": d.device_id, "name": d.name, "layers": [start, start + n], "holds_output_head": holds_head,
+            "endpoint": d.endpoint, "bandwidth_gbps": d.mem_bandwidth_gbps, "bandwidth_source": d.bandwidth_source,
             "weights_bytes": weights, "kv_bytes": kv, "runtime_bytes": model.runtime_overhead_bytes,
             "headroom_bytes": d.budget_bytes - int(d.budget_bytes * (1 - policy.headroom_fraction)),
             "budget_bytes": d.budget_bytes, "margin_bytes": _usable_bytes(d, model, policy) + model.runtime_overhead_bytes - need,
@@ -167,19 +193,32 @@ def plan(devices: list[DeviceProfile], model: ModelSpec, policy: PlacementPolicy
         start += n
     assert start == model.layers and all(s["margin_bytes"] >= 0 for s in stages) and per_layer > 0
 
+    # Per-token latency (spec 7.2): compute from weights and effective bandwidth, plus the backend's fixed
+    # transport overhead, plus round trips and per-token traffic for every remote stage.
+    cost = policy.backend_cost
+    local = policy.local_device or stages[-1]["name"]
+    remote = [(s, d) for s, d in zip(stages, [d for d, _ in order]) if s["name"] != local]
+    for s, d in remote:
+        s["est_network_ms"] = round(cost.round_trips_per_token * d.rtt_ms + (
+            cost.bytes_per_token_per_remote * 8 / (d.link_mbps * 1e6) * 1000 if d.link_mbps else 0), 2)
+    for s in stages:
+        s.setdefault("est_network_ms", 0.0)
     compute_ms = sum(s["est_compute_ms"] for s in stages)
-    # Coordinator-centric exchange per stage, as in an RPC backend; refine with measured traces.
-    network_ms = sum(s["rtt_ms"] for s in stages)
-    token_ms = compute_ms + network_ms
+    network_ms = sum(s["est_network_ms"] for s in stages)
+    overhead_ms = (cost.first_remote_ms + cost.extra_remote_ms * (len(remote) - 1)) if remote else 0.0
+    token_ms = compute_ms + network_ms + overhead_ms
     explanation.update({
         "feasible": True,
         "stages": stages,
         "reservation_bytes": {s["device_id"]: s["kv_bytes"] for s in stages},
         "latency_budget": {
             "compute_ms": round(compute_ms, 2), "network_ms": round(network_ms, 2),
+            "backend_overhead_ms": round(overhead_ms, 2), "remote_stages": len(remote),
             "per_token_ms": round(token_ms, 2), "tokens_per_s": round(1000 / token_ms, 2) if token_ms else None,
-            "dominant_stage": max(stages, key=lambda s: s["est_compute_ms"] + s["rtt_ms"])["device_id"],
-            "basis": "nominal estimate: weights/bandwidth plus one round trip per stage",
+            "dominant_stage": max(stages, key=lambda s: s["est_compute_ms"] + s["est_network_ms"])["device_id"],
+            "backend_cost": asdict(cost),
+            "basis": ("weights/effective bandwidth + fitted backend overhead + round trips and per-token "
+                      "traffic per remote stage; link bandwidth term omitted where unmeasured"),
         },
         "capacity_basis": ("fits a single eligible device budget" if explanation["single_device_fit"]
                            else "exceeds every eligible device budget (owner-budget capacity, Test C)"),

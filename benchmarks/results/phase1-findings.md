@@ -59,3 +59,50 @@ taken from llama.cpp's own load log).
 - A per-backend bandwidth or decode probe in the agent, feeding the planner.
 - Add the per-hop overhead term to the latency budget and recheck the 30% target.
 - A configuration that exceeds the Mac's owner budget (Test C) with a real model.
+
+## Round 2: latency model, simulated network, owner caps (2026-11-05)
+
+Raw results: `phase1-latency-20261105T225814Z.json`. Same machine and model; RPC workers are local CPU
+processes and network paths come from `benchmarks/netem_relay.py`, a userspace relay that adds delay
+and bandwidth caps without changing system settings.
+
+**Latency model now meets the spec 7.2 target on held-out topologies.** Per token:
+`sum(W_i / BW_backend) + O_first + O_extra * (remote stages - 1) + k * sum(remote RTT) + traffic / link bandwidth`.
+Fitted on two calibration topologies only: O_first = 3.58 ms, O_extra = 0.74 ms, k = 1.02 round trips
+per token per remote stage. Effective decode bandwidth: Metal 156 GB/s, CPU 4 threads 113 GB/s,
+CPU 2 threads 71 GB/s on this model.
+
+| Held-out topology | Predicted ms/token | Measured | Error | Bandwidth-only model error |
+|---|---:|---:|---:|---:|
+| Metal + 1 worker, even split | 7.72 | 8.79 | -12.2% | -52.9% |
+| Metal + 2 workers | 8.38 | 9.19 | -8.8% | -55.8% |
+| Metal + 3 workers | 10.08 | 10.75 | -6.2% | -53.2% |
+| Metal + 2 workers, each behind 80 ms | 173.7 | 175.3 | -0.9% | not applicable |
+
+**Round trips add up per remote stage.** Decode time rose linearly with RTT (7.9, 29.2, 89.5, 161.9
+ms/token at 0, 20, 80, 150 ms), about one round trip per token per remote stage. Two remote stages at
+80 ms each cost about 175 ms per token. Over the internet the round trips, not compute, set the speed.
+
+**llama.cpp RPC sends about 0.62 MB per token per remote stage.** With 20 ms RTT, decode went from
+29 ms/token uncapped to 78, 129, and 228 ms/token at 100, 50, and 25 Mbps; all three caps imply
+0.61 to 0.63 MB per token. A typical home upload of 10 to 25 Mbps therefore limits each remote stage to
+roughly 2 to 5 tokens per second before any delay. This is likely graph serialisation and will grow
+with larger models, so it must be remeasured on the Test C model, and it is a strong argument for a
+transport that does not resend the graph each token.
+
+**Model loading streams weights over the RPC link.** 198 MiB took 18.5 s at 100 Mbps and 69 s at
+25 Mbps. At pilot scale (several GB per remote stage) loading over a home connection takes tens of
+minutes, which is why FR 30 (download each partition locally and verify it) matters for this backend.
+
+**Owner memory caps are now enforced by the agent.** `difa-agent run --worker-bin ...` starts and
+supervises the llama.cpp worker only while contribution is allowed and the lease is valid, kills it
+when resident memory exceeds the owner's cap (250 ms watchdog), keeps it stopped until the cap is
+raised, and halts it on SIGTERM or Ctrl-C. The coordinator treats a stopped worker or a paused device
+as a drain and marks the deployment unavailable. Tested end to end with real agents and workers:
+lowering a cap mid-deployment killed the worker, drained the deployment, returned 503 to new requests,
+and recovered when the cap was raised. Limitation: memory can exceed the cap for up to one watchdog
+interval; hard prevention needs OS limits (cgroups, Job Objects) in Phase 2.
+
+**Per-backend decode probe.** The agent can time real decoding of the catalog reference model with
+llama-bench (`--decode-probe-bench`, `--decode-probe-model`); the coordinator converts tokens per
+second into effective bandwidth and uses it in planning, recording the source in each stage.

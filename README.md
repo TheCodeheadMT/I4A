@@ -96,13 +96,19 @@ Full write-up with numbers: [benchmarks/results/phase1-findings.md](benchmarks/r
 Findings so far that change the design:
 
 - Metal on the Mac Studio reports a working-set limit of 103,079 MB, inside the spec 3.2 planning range.
-- An RPC worker advertises all host memory and has no memory-cap option, so owner limits (FR 07) must be
-  enforced by the agent around the worker, not by llama.cpp.
+- An RPC worker advertises all host memory and has no memory-cap option, so the agent now supervises
+  the worker and kills it above the owner's cap (`difa-agent run --worker-bin <ggml-rpc-server>`); the
+  coordinator drains the deployment when a worker stops or a device pauses.
 - A small tensor-split share can round a device down to zero layers while it still appears as a
   participant; the harness and adapter now fail any placement where a stage holds no weights.
 - llama.cpp puts the output head on the last device. The planner now orders stages so the strongest
   device runs last and counts the head against its budget.
 - llama.cpp labels every RPC buffer `RPC0[host:port]`; only the endpoint identifies the device.
+- The latency model now includes fitted backend overhead, round trips, and per-token traffic; it predicts
+  held-out topologies within 13 percent (spec target 30). Each token costs about one round trip and about
+  0.62 MB of RPC traffic per remote stage, so home upload bandwidth and latency will dominate WAN speed.
+- `benchmarks/netem_relay.py` simulates delay and bandwidth caps on loopback; `benchmarks/phase1_latency.py`
+  runs the calibration, hold-out validation, delay sweep, and bandwidth sweep.
 
 ## Spec coverage
 

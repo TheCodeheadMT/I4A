@@ -18,6 +18,11 @@ pub struct Probe {
 }
 
 pub fn real() -> Probe {
+    real_with(measure_bandwidth())
+}
+
+/// Probe with a previously measured bandwidth, so heartbeats do not repeat the copy benchmark.
+pub fn real_with(mem_bandwidth_gbps: f64) -> Probe {
     let mut sys = System::new();
     sys.refresh_memory();
     Probe {
@@ -25,9 +30,29 @@ pub fn real() -> Probe {
         arch: std::env::consts::ARCH.to_string(),
         available_bytes: sys.available_memory(),
         power: detect_power(),
-        mem_bandwidth_gbps: measure_bandwidth(),
+        mem_bandwidth_gbps,
         simulated_rtt_ms: 0.0,
     }
+}
+
+/// Per-backend decode probe (FR 06, Phase 1 finding 6): a CPU memory copy cannot stand in for
+/// accelerator bandwidth, so the agent times real decoding of the catalog's reference model with
+/// llama-bench on the backend it will contribute. Returns tokens per second.
+pub fn decode_probe(bench: &std::path::Path, model: &std::path::Path, cpu_threads: Option<u32>) -> Result<f64, String> {
+    let mut cmd = Command::new(bench);
+    cmd.args(["-m", &model.to_string_lossy(), "-p", "0", "-n", "32", "-r", "2", "-o", "json"]);
+    if let Some(t) = cpu_threads {
+        cmd.args(["-ngl", "0", "-t", &t.to_string()]);
+    }
+    let out = cmd.output().map_err(|e| format!("cannot run llama-bench: {e}"))?;
+    if !out.status.success() {
+        return Err("llama-bench failed".into());
+    }
+    let rows: serde_json::Value = serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())?;
+    rows.as_array()
+        .and_then(|r| r.iter().find(|row| row["n_gen"].as_u64().unwrap_or(0) > 0))
+        .and_then(|row| row["avg_ts"].as_f64())
+        .ok_or_else(|| "no decode result from llama-bench".into())
 }
 
 /// Reference-group stand-ins from spec 3 and 3.2. Numbers are planning values, not measurements.

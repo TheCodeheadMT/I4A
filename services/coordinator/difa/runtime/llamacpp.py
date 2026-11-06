@@ -61,6 +61,7 @@ class LlamaCppRuntime:
         self.local_device = local_device            # device name served by this host's Metal device
         self.rpc_endpoints = dict(rpc_endpoints)    # device name -> host:port of its rpc-server
         self.backend_digest = backend_digest
+        self.allow_remote_rpc = allow_remote_rpc
         self.log_dir = Path(log_dir or Path.home() / ".cache" / "difa-phase1" / "adapter-logs")
         for name, ep in self.rpc_endpoints.items():
             if not allow_remote_rpc and not ep.startswith(LOOPBACK_PREFIXES):
@@ -95,8 +96,11 @@ class LlamaCppRuntime:
             if st["name"] == self.local_device:
                 devs.append("MTL0")
                 owners["MTL0"] = st
-            elif st["name"] in self.rpc_endpoints:
-                ep = self.rpc_endpoints[st["name"]]
+            elif st["name"] in self.rpc_endpoints or st.get("endpoint"):
+                ep = self.rpc_endpoints.get(st["name"]) or st["endpoint"]
+                if not self.allow_remote_rpc and not ep.startswith(LOOPBACK_PREFIXES):
+                    raise RuntimeFailure("ENDPOINT_REFUSED", f"Non-loopback worker {ep} refused: llama.cpp RPC "
+                                         "is insecure outside a restricted research network.", False)
                 devs.append(f"RPC{len(rpc)}")
                 rpc.append(ep)
                 owners[f"rpc:{ep}"] = st

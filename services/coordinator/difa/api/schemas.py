@@ -56,6 +56,22 @@ class CredentialIn(Strict):
     expires_days: int = Field(default=30, ge=1, le=90)
 
 
+class DecodeProbe(Strict):
+    model: str = Field(max_length=100)
+    tokens_per_s: float = Field(gt=0)
+    backend: str = Field(max_length=40)
+    threads: int | None = Field(default=None, ge=1)
+
+
+class WorkerStatus(Strict):
+    state: Literal["running", "stopped"]
+    endpoint: str = Field(max_length=100)
+    rss_bytes: int = Field(ge=0)
+    peak_rss_bytes: int = Field(ge=0)
+    cap_kills: int = Field(ge=0)
+    last_stop_reason: str | None = Field(default=None, max_length=200)
+
+
 class Capabilities(Strict):
     os: str = Field(max_length=40)
     arch: str = Field(max_length=40)
@@ -66,6 +82,7 @@ class Capabilities(Strict):
     rtt_ms: float = Field(ge=0)
     power: Literal["ac", "battery", "unknown"] = "unknown"
     battery_pct: float | None = Field(default=None, ge=0, le=100)
+    decode_probe: DecodeProbe | None = None
 
 
 class Policy(Strict):
@@ -88,6 +105,7 @@ class EnrollIn(Strict):
 class HeartbeatIn(Strict):
     capabilities: Capabilities
     paused: bool = False  # effective local state after the agent applies owner policy
+    worker: WorkerStatus | None = None  # present when the agent supervises an inference worker
 
 
 class PolicyPatch(Strict):

@@ -32,6 +32,16 @@
             ],
             "title": "Battery Pct"
           },
+          "decode_probe": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DecodeProbe"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "formats": {
             "items": {
               "type": "string"
@@ -194,6 +204,45 @@
         "title": "CredentialIn",
         "type": "object"
       },
+      "DecodeProbe": {
+        "additionalProperties": false,
+        "properties": {
+          "backend": {
+            "maxLength": 40,
+            "title": "Backend",
+            "type": "string"
+          },
+          "model": {
+            "maxLength": 100,
+            "title": "Model",
+            "type": "string"
+          },
+          "threads": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Threads"
+          },
+          "tokens_per_s": {
+            "exclusiveMinimum": 0.0,
+            "title": "Tokens Per S",
+            "type": "number"
+          }
+        },
+        "required": [
+          "model",
+          "tokens_per_s",
+          "backend"
+        ],
+        "title": "DecodeProbe",
+        "type": "object"
+      },
       "DeploymentIn": {
         "additionalProperties": false,
         "properties": {
@@ -317,6 +366,16 @@
             "default": false,
             "title": "Paused",
             "type": "boolean"
+          },
+          "worker": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkerStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -741,6 +800,60 @@
         ],
         "title": "Visibility",
         "type": "string"
+      },
+      "WorkerStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "cap_kills": {
+            "minimum": 0.0,
+            "title": "Cap Kills",
+            "type": "integer"
+          },
+          "endpoint": {
+            "maxLength": 100,
+            "title": "Endpoint",
+            "type": "string"
+          },
+          "last_stop_reason": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Stop Reason"
+          },
+          "peak_rss_bytes": {
+            "minimum": 0.0,
+            "title": "Peak Rss Bytes",
+            "type": "integer"
+          },
+          "rss_bytes": {
+            "minimum": 0.0,
+            "title": "Rss Bytes",
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "running",
+              "stopped"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state",
+          "endpoint",
+          "rss_bytes",
+          "peak_rss_bytes",
+          "cap_kills"
+        ],
+        "title": "WorkerStatus",
+        "type": "object"
       }
     }
   },

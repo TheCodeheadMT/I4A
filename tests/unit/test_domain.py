@@ -221,3 +221,28 @@ def test_real_small_model_fits_every_device_so_it_is_not_a_capacity_result():
     assert set(out["single_device_fit"]) == {"mac", "hp", "vm"}
     assert [s["device_id"] for s in out["stages"]] == ["mac"]
     assert out["capacity_basis"] == "fits a single eligible device budget"
+
+
+def test_latency_budget_counts_overhead_round_trips_and_link_traffic():
+    from difa.domain.placement import LLAMACPP_RPC_V090 as cost
+    out = plan(REF, CATALOG["pilot-test-c"], POLICY)
+    lb = out["latency_budget"]
+    assert lb["remote_stages"] == 2  # the Mac runs last and is the coordinator-local stage
+    assert lb["backend_overhead_ms"] == round(cost.first_remote_ms + cost.extra_remote_ms, 2)
+    assert lb["network_ms"] == round(cost.round_trips_per_token * (60 + 5), 2)  # vm and hp round trips
+    slow = [dev("mac", 64, 800, 1), dev("hp", 8, 51, 5, link_mbps=25), dev("vm", 4.5, 15, 60, link_mbps=25)]
+    slow_lb = plan(slow, CATALOG["pilot-test-c"], POLICY)["latency_budget"]
+    traffic_ms = 2 * cost.bytes_per_token_per_remote * 8 / 25e6 * 1000
+    assert abs(slow_lb["network_ms"] - (lb["network_ms"] + traffic_ms)) < 0.05
+
+
+def test_committed_calibration_meets_the_30_percent_target():
+    """Evidence check: held-out topologies in the committed Phase 1 run stay within spec 7.2's target."""
+    import json
+    from pathlib import Path
+    runs = sorted((Path(__file__).resolve().parents[2] / "benchmarks" / "results").glob("phase1-latency-*.json"))
+    if not runs:
+        pytest.skip("no committed latency calibration run")
+    report = json.loads(runs[-1].read_text())
+    assert report["validation"] and all(abs(v["error_pct"]) <= 30 for v in report["validation"])
+    assert all(abs(v["error_pct"]) > 30 for v in report["bandwidth_only_model"])  # the old model fails
